@@ -1,0 +1,173 @@
+program test_deposition
+        real :: Te, ne, E, M1, M2, Em, ee, mi, P0
+        real :: dL, d_theta, dx
+        real, dimension(:,:), allocatable :: L, x, f, v
+        real, dimension(:,:), allocatable :: dt, P_L, costheta, dis, P_theta
+        real, dimension(:,:,:), allocatable :: P
+        real, dimension(:,:,:), allocatable :: phi
+        real, dimension(:,:,:), allocatable :: E0
+        real, dimension(:), allocatable :: eta
+        integer :: i, j, kk, ll
+    
+    real :: deta
+    integer :: neta 
+    real :: BB(3) 
+    real :: deposition
+        Te = 50.0
+        ne = 7.2e19
+        E = 6.0 * Te
+        M1 = 2.0
+        M2 = 183.84
+        Em = E * 4.0 * M1 * M2 / (M1 + M2) / (M1 + M2)
+        ee = 1.6e-19
+        mi = 1.67e-27
+        P0 = 0.0
+        dL = 1e-6
+        d_theta = 2e-2
+    allocate(L(int(5e-3 / dL),1))
+    L(:,1) = [(i * dL, i = 1, size(L))]
+    allocate(x(1,int(Em / dx)))
+    x(1,:) = [(i * dx, i = 1, size(x))]
+    allocate(f(1,size(x)))
+    f(1,:) = x(1,:) * (1.0 - sqrt(x(1,:) / Em)) / ((x(1,:) + 8.7)**3.0)
+    f(1,:) = f(1,:) / sum(f(1,:)) ! 归一化积分为1
+    allocate(v(1,size(x)))
+    v(1,:) = sqrt(2.0 * x(1,:) * ee / (M2 * mi))
+    
+    ! 计算自由程dt和P_L的矩阵，调用calc_adas函数计算碰撞截面积，注意矩阵转置操作'
+    allocate(dt(size(L), size(v)))
+  !  dt(:,:) = matmul(L(:,1), (1.0 / v(1,:)))
+    dt(:,:) = matmul(reshape(L(:,1), [size(L), 1]), reshape((1.0 / v(1,:)), [1, size(v)]))
+    allocate(P_L(size(L), size(v)))
+    P_L(:,:) = calc_adas(1, dt(:,:), Te, ne) 
+    P_L(:,:) = P_L(:,:) * reshape(f(1,:), [1, size(f)]) * dx ! 归一化积分为1
+    ! 计算costheta和dis的矩阵，注意开方操作和矩阵转置操作'
+    ! 使用一维数组来表示costheta，用reshape函数来改变它的形状'
+    allocate(costheta(1,int(1.0 / d_theta)))
+    costheta(1,:) = [(sqrt(1.0 - (i * d_theta)**2), i = 1, size(costheta))]
+    allocate(dis(size(L), size(costheta)))
+ !  dis(:,:) = matmul(L(:,1), costheta(1,:))
+    dis(:,:) = matmul(reshape(L(:,1), [size(L), 1]), reshape(costheta(1,:), [1, size(costheta)]))
+    ! 计算eta和P_theta的矩阵，注意角度单位是弧度'
+    deta = 2.0 * pi / 72.0
+    neta = int(2.0 * pi / deta)
+    ! 使用一维数组来表示eta，用reshape函数来改变它的形状'
+    allocate(eta(neta))
+    eta(:,1) = [(i * deta, i = 1, size(eta))]
+    eta(:,1) = reshape(eta(:,1), [size(eta), 1]) ! 将一维数组转换为列向量'
+    allocate(P_theta(size(costheta), size(eta)))
+    P_theta(:,1) = d_theta * ones(size(costheta), size(eta)) * deta
+    ! 计算P的四维数组，注意循环索引的顺序'
+    allocate(P(size(L), size(v), size(costheta), size(eta)))
+    do kk = 1, size(costheta)
+    do ll = 1, size(eta)
+    P(:,:,kk,ll) = P_L * P_theta(kk,ll)
+    end do
+    end do
+    ! 计算brooks potential的矩阵，调用calc_brooks函数计算电势'
+    allocate(phi(size(L) * size(costheta)))
+    phi(:,1) = calc_brooks(dis, Te, ne,BB)
+    phi(:,1) = reshape(phi(:,1), [size(L), size(costheta), 1]) ! 将一维数组转换为三维数组'
+
+    allocate(E0(size(v), size(costheta), size(eta)))
+    do j = 1, size(v)
+    do kk = 1, size(costheta)
+    do ll = 1, size(eta)
+    E0(j,kk,ll) = v(j) * cos(eta(ll)) * cos(abs(acos(costheta(kk)) - 85.0 / 180.0 * pi))
+    end do
+    end do
+    end do
+    do i = 1, size(L)
+    do j = 1, size(v)
+    do kk = 1, size(costheta)
+    if (x(j) + phi(i,kk,1) > 0.0) then
+    P0 = P0 + P(i,j,kk)
+    end if
+    end do
+    end do
+    end do
+    deposition = 1.0 - P0 / sum(P)
+    
+    ! 输出结果
+    print *, '鞘层电势矩阵为：'
+    print *, phi
+    print *, '碰撞概率矩阵为：'
+    print *, P
+    print *, '沉积率为：'
+    print *, deposition
+    contains
+    function calc_brooks(dis, Te, ne) result(phi)
+        ! 声明变量
+        real, dimension(:,:), intent(in) :: dis ! 粒子到靶板的距离矩阵
+        real, intent(in) :: Te ! 电子温度
+        real, intent(in) :: ne ! 电子密度
+        real, dimension(3), intent(in) :: B ! 磁场
+        real, dimension(size(dis)) :: phi ! 鞘层电势矩阵
+        real, parameter :: EPS_ZERO = 8.854187817e-12 ! 真空介电常数
+        real, parameter :: EL_CHG = 1.60217662e-19 ! 元电荷
+        real, parameter :: ATOMIC_MASS_UNIT = 1.66053904e-27 ! 原子质量单位
+        real, parameter :: dx = 1e-7 ! 微分步长
+        real :: phi_0, phi_1, phi_2, lamuda, R
+        phi_0 = -3.0 * Te
+    
+        ! 计算德拜长度
+        lamuda = sqrt(EPS_ZERO * Te / (ne * EL_CHG))
+    
+        ! 计算粒子半径
+        R = sqrt(8.0 * Te * 2.0 * ATOMIC_MASS_UNIT * EL_CHG / pi) / (norm2(B) * EL_CHG)
+    
+        ! 计算鞘层电势
+        phi_1 = 0.25 * phi_0
+        phi_2 = 0.75 * phi_0
+        phi = phi_1 * exp(-dis / (2.0 * lamuda)) + phi_2 * exp(-dis / R)
+        phi_1 = phi_1 * exp(-(dis + dx) / (2.0 * lamuda)) + phi_2 * exp(-(dis + dx) / R)
+        E = (phi_1 - phi) / dx ! 计算电场强度，但没有返回值，可能是多余的
+    
+    end function calc_brooks 
+    function calc_adas(q, dt, Te, Ne) result(P)
+        ! 声明变量
+        integer, intent(in) :: q ! 原子价态，取值为1到40之间的整数
+        real, dimension(:,:), intent(in) :: dt ! 自由程矩阵，单位为秒
+        real, intent(in) :: Te ! 电子温度，单位为eV
+        real, intent(in) :: Ne ! 电子密度，单位为m^-3
+        real, dimension(size(dt(:,1),dt(1,:))) :: P ! 碰撞概率矩阵，取值在0到1之间
+        character(len=20) :: filename, filename1 ! 数据文件名
+        integer :: nTe, nNe ! 网格点个数
+        real, dimension(:), allocatable :: logTe, logNe, logScd, logScd_true ! 对数形式的电子温度，电子密度，碰撞电离系数
+        real :: logTe_input, logNe_input, logScd_input ! 对数形式的输入参数
+        real :: Scd_input, D, v, d ! 碰撞电离系数，碰撞频率，速度，平均自由程
+        filename = 'D:\adas\scd89_W.dat' ! 文件名
+        filename1 = 'D:\adas\acd89_W.dat' ! 文件名
+        headerin = 8 + (q - 1) * 41 ! 跳过的行数
+        ! 提取网格点和有效系数
+        open(unit=10, file=filename, status='old', action='read') ! 打开文件
+        allocate(logTe(24)) ! 分配内存
+        allocate(logNe(16)) ! 分配内存
+        read(10, *) ! 跳过第一行
+        read(10, *) logNe(1:12) ! 读取第二行的前12个数据作为电子密度的对数
+        read(10, *) logNe(13:16), logTe(1:8) ! 读取第三行的前4个数据作为电子密度的对数，后8个数据作为电子温度的对数
+        read(10, *) logTe(9:16) ! 读取第四行的前8个数据作为电子温度的对数
+        read(10, *) logTe(17:20), (logScd(i), i = 1, 4) ! 读取第五行的前4个数据作为电子温度的对数，后4个数据作为碰撞电离系数的对数
+        close(unit=10) ! 关闭文件
+        nTe = 20 ! 电子温度的网格点个数
+        nNe = 12 ! 电子密度的网格点个数
+        allocate(logScd(nTe * nNe)) ! 分配内存
+        open(unit=10, file=filename, status='old', action='read') ! 打开文件
+        do i = 1, headerin + 1 ! 跳过前面的行数
+            read(10, *)
+        end do
+        do i = 5, nTe * nNe + 4 ! 读取有效系数的对数
+            read(10, *) (logScd(j), j = i - 4, i)
+            i = i + 1
+            read(10, *)
+        end do
+        close(unit=10) ! 关闭文件
+        logScd_true = reshape(logScd, [nTe, nNe])(:,1) - 6.0 ! 提取第一列并减去6
+        logTe_input = log10(Te) ! 输入电子温度的对数
+        logNe_input = log10(Ne * (0.01**3)) ! 输入电子密度的对数，注意单位转换
+        logScd_input = interp1(logTe, logScd_true, logTe_input, 'spline') ! 插值得到碰撞电离系数的对数
+        Scd_input = 10.0**logScd_input ! 插值得到碰撞电离系数
+        D = (Scd_input * Ne * 1e6) ! 计算碰撞频率，注意单位转换
+        P = exp(-D * dt) ! 计算碰撞概率
+    end function calc_adas
+end program test_deposition
